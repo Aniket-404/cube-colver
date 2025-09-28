@@ -1,0 +1,38 @@
+{
+  "name": "rubiks-cube-solver",
+  "version": "1.0.0",
+  "description": "A web-based solver for Rubik's Cubes supporting 2x2x2, 3x3x3, and 4x4x4 puzzle types",
+  "private": true,
+  "scripts": {
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && npm run dev",
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "start:frontend": "cd frontend && npm run preview",
+    "start:backend": "cd backend && npm start",
+    "install:all": "npm install && cd frontend && npm install && cd ../backend && npm install"
+  },
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aniket-404/cube-solver.git"
+  },
+  "keywords": [
+    "rubiks-cube",
+    "solver",
+    "3d",
+    "threejs",
+    "react",
+    "nodejs",
+    "express"
+  ],
+  "author": "Aniket-404",
+  "license": "MIT"
+}
