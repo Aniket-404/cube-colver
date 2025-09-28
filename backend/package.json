@@ -1,0 +1,25 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "Backend API server for Rubiks Cube Solver supporting 2x2x2, 3x3x3, and 4x4x4 cubes",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "rubiks-cube",
+    "solver",
+    "api",
+    "express",
+    "nodejs"
+  ],
+  "author": "Aniket-404",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.1.0"
+  }
+}
