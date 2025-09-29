@@ -18,6 +18,50 @@
       "rotationApplied": 0,
       "source": "search-sample",
       "timestamp": "2025-09-29T11:08:19.915Z"
+    },
+    {
+      "id": 8002,
+      "pattern": "01110010",
+      "algorithm": "U R' U R U2 R'",
+      "canonical": "01001110",
+      "rotationApplied": 0,
+      "source": "forward-discovery",
+      "discoveredProducing": "R U2 R' U' R U'",
+      "iterations": 600,
+      "timestamp": "2025-09-29T11:11:34.489Z"
+    },
+    {
+      "id": 8003,
+      "pattern": "00011000",
+      "algorithm": "F' U R'",
+      "canonical": "00011000",
+      "rotationApplied": 0,
+      "source": "forward-discovery",
+      "discoveredProducing": "R U' F",
+      "iterations": 600,
+      "timestamp": "2025-09-29T11:11:34.490Z"
+    },
+    {
+      "id": 8004,
+      "pattern": "11101011",
+      "algorithm": "U F' U2 F U' R U2 R'",
+      "canonical": "00111111",
+      "rotationApplied": 0,
+      "source": "forward-discovery",
+      "discoveredProducing": "R U2 R' U F' U2 F U'",
+      "iterations": 600,
+      "timestamp": "2025-09-29T11:11:34.494Z"
+    },
+    {
+      "id": 8005,
+      "pattern": "11010000",
+      "algorithm": "F' R'",
+      "canonical": "00001011",
+      "rotationApplied": 0,
+      "source": "forward-discovery",
+      "discoveredProducing": "R F",
+      "iterations": 600,
+      "timestamp": "2025-09-29T11:11:34.495Z"
     }
   ]
 }

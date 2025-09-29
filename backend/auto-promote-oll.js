@@ -12,6 +12,7 @@ import { registerOLLCase } from './services/solver3x3x3.js';
 import { createSolvedCube } from './utils/cubeStructures.js';
 import { validateOLLCandidate } from './utils/ollCandidateValidator.js';
 import { searchOLLFromState } from './search/ollSearchEnhanced.js';
+import { heuristicSearchOLL } from './search/ollHeuristicSearch.js';
 
 const DERIVED = resolve(process.cwd(), 'backend', 'data', 'oll-derived.json');
 
@@ -56,6 +57,19 @@ function main(){
             } else {
               console.log('  ❌ Validation failed after search candidate');
             }
+        }
+        if(!found){
+          const hRes = heuristicSearchOLL(cube, { maxDepth: 12 });
+          if(hRes.success){
+            console.log(`  ✅ Heuristic search found candidate: ${hRes.algorithm} (depth ${hRes.depth})`);
+            const v2 = validateOLLCandidate({ algorithm: hRes.algorithm, expectedPattern: pattern });
+            if(v2.ok){
+              found = { algorithm: hRes.algorithm, validation: v2 };
+              break;
+            } else {
+              console.log('  ❌ Heuristic candidate failed validation');
+            }
+          }
         }
       } catch(e){ console.log('  Sample parse error:', e.message); }
     }

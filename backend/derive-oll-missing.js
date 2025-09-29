@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { mineOLLPatterns } from './utils/ollPatternMining.js';
+import { discoverProducerForPattern } from './search/ollPatternDiscovery.js';
 import { listUnknownPatterns } from './utils/ollUnknownLogger.js';
 import { registerOLLCase } from './services/solver3x3x3.js';
 import { validateOLLCandidate } from './utils/ollCandidateValidator.js';
@@ -96,7 +97,25 @@ function main(){
       }
     }
     if(!matched){
-      console.log(`❌ No mined match (direct or rotational) for target ${target}`);
+      console.log(`❌ No mined match (direct or rotational) for target ${target} — trying forward discovery BFS`);
+      const discovery = discoverProducerForPattern(target, 8);
+      if(discovery.success){
+        const entry = {
+          id: 8000 + derivedDb.derived.length,
+          pattern: target,
+          algorithm: discovery.solvingAlgorithm,
+          canonical: canonicalizePattern(target).canonical,
+          rotationApplied: 0,
+            source: 'forward-discovery',
+            discoveredProducing: discovery.producingAlgorithm,
+            iterations,
+            timestamp: new Date().toISOString()
+        };
+        derivedDb.derived.push(entry);
+        registerOLLCase({ id: entry.id, pattern: entry.pattern, algorithm: entry.algorithm, name: `Auto-Discovered ${entry.pattern}`, verified: false, notes: entry.source });
+        console.log(`✅ Forward discovery produced solving algorithm for ${target}: ${entry.algorithm}`);
+        registered++;
+      }
     }
   }
 
