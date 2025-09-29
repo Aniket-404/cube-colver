@@ -5,12 +5,50 @@
 import { createSolvedCube } from './cubeStructures.js';
 import { parseMoveNotation3x3, applyMoveSequence3x3, getOLLPattern, isOLLComplete } from '../services/solver3x3x3.js';
 
-const SAFE_BASE_ALGS = [
+// Core seed algorithms (orientation-preserving / well-known OLL cases)
+const BASE = [
   "R U2 R' U' R U' R'",           // Sune
   "L' U2 L U L' U L",            // Anti-Sune
   "F R U R' U' F'",              // T
-  "r U R' U' r' F R F'"          // L-shape
+  "r U R' U' r' F R F'",         // L-shape
+  "R U R' U R U2 R'",            // Anti-Sune (alt)
+  "R2 D R' U2 R D' R' U2 R'",     // Small lightning (longer, diversity)
 ];
+
+// Generate simple U-conjugations (U^k A U^-k) for k in 1..3 to diversify orientation starting states
+function uConjugates(alg){
+  const variants = new Set([alg]);
+  const u = ['U','U2',"U'"];
+  for(const pre of u){
+    let post;
+    if(pre === 'U') post = "U'"; else if(pre === "U'") post = 'U'; else post = 'U2';
+    variants.add(`${pre} ${alg} ${post}`);
+  }
+  return [...variants];
+}
+
+function mirrorAlg(alg){
+  // Quick and dirty mirror across M-slice: swap R<->L', r<->l', F stays, U stays. Accept approximation.
+  return alg.replace(/R2/g,'@R2@').replace(/L2/g,'@L2@')
+    .replace(/R'/g,'@Rp@').replace(/R /g,'@R @')
+    .replace(/L'/g,'@Lp@').replace(/L /g,'@L @')
+    .replace(/R/g,'L').replace(/L/g,'R')
+    .replace(/@R2@/g,'R2').replace(/@L2@/g,'L2')
+    .replace(/@Rp@/g,'R').replace(/@R @/g,"R' ")
+    .replace(/@Lp@/g,'L').replace(/@L @/g,"L' ");
+}
+
+const SAFE_BASE_ALGS = (()=>{
+  const set = new Set();
+  for(const base of BASE){
+    for(const variant of uConjugates(base)){
+      set.add(variant);
+      // Include mirror to broaden coverage
+      set.add(mirrorAlg(variant));
+    }
+  }
+  return [...set];
+})();
 
 function invertAlgorithm(alg){
   return alg.trim().split(/\s+/).reverse().map(m=>{

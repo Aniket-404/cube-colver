@@ -1,3 +1,23 @@
 {
-  "derived": []
+  "derived": [
+    {
+      "id": 8000,
+      "pattern": "11011000",
+      "algorithm": "U2 F R' U R U' F' U2",
+      "canonical": "00011011",
+      "rotationApplied": 0,
+      "source": "reverse-mining-direct",
+      "iterations": 400,
+      "timestamp": "2025-09-29T11:07:51.666Z"
+    },
+    {
+      "id": 9001,
+      "pattern": "00111010",
+      "algorithm": "F' R U R' F U' F'",
+      "canonical": "00111010",
+      "rotationApplied": 0,
+      "source": "search-sample",
+      "timestamp": "2025-09-29T11:08:19.915Z"
+    }
+  ]
 }
