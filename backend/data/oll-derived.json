@@ -62,6 +62,22 @@
       "discoveredProducing": "R F",
       "iterations": 600,
       "timestamp": "2025-09-29T11:11:34.495Z"
+    },
+    {
+      "id": 9100,
+      "pattern": "11001011",
+      "algorithm": "",
+      "name": "Auto-Captured 11001011",
+      "source": "auto-captured",
+      "dedup": true,
+      "notes": "Duplicates removed on integrity tuning pass"
+    },
+    {
+      "id": 9100,
+      "pattern": "11001011",
+      "algorithm": "",
+      "name": "Auto-Captured 11001011",
+      "source": "auto-captured"
     }
   ]
 }

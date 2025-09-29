@@ -19,9 +19,108 @@ import {
 } from '../utils/cubeStructures.js';
 import { recordUnknownOLL } from '../utils/ollUnknownLogger.js';
 import { createRequire } from 'module';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, appendFileSync, mkdirSync, writeFileSync } from 'fs';
 import { resolve } from 'path';
 const require = createRequire(import.meta.url);
+
+// ========================= OLL METRICS & DYNAMIC CLASSIFICATION =========================
+// Centralized data directory
+const DATA_DIR = resolve(process.cwd(), 'backend', 'data');
+// Metrics file (JSON Lines) for empirical evaluation of algorithms during OLL
+const OLL_METRICS_PATH = resolve(DATA_DIR, 'oll-alg-metrics.jsonl');
+// Runtime learned finishers (persist across runs)
+const RUNTIME_FINISHERS_PATH = resolve(DATA_DIR, 'oll-runtime-finishers.json');
+function ensureMetricsPath(){
+    try {
+        if(!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+    } catch(e) {}
+}
+ensureMetricsPath();
+
+// Load persisted runtime finisher algorithms (canonicalPattern -> algorithm)
+function loadRuntimeFinishers(){
+    if(global.__OLL_RUNTIME_FINISHERS) return;
+    try {
+        if(existsSync(RUNTIME_FINISHERS_PATH)){
+            global.__OLL_RUNTIME_FINISHERS = JSON.parse(readFileSync(RUNTIME_FINISHERS_PATH,'utf8'));
+            console.log(`[OLL] Loaded runtime finisher table (${Object.keys(global.__OLL_RUNTIME_FINISHERS).length})`);
+        } else {
+            global.__OLL_RUNTIME_FINISHERS = {};
+        }
+    } catch(e){ global.__OLL_RUNTIME_FINISHERS = {}; }
+}
+loadRuntimeFinishers();
+
+function recordOLLMetric(entry){
+    try {
+        appendFileSync(OLL_METRICS_PATH, JSON.stringify({ ts: Date.now(), ...entry }) + '\n');
+    } catch(e){ /* silent */ }
+}
+
+// Finisher failure counting to downgrade misclassified finishers → setup
+const finisherFailureCounts = Object.create(null); // key: caseId or canonicalKey
+const FINISHER_DOWNGRADE_THRESHOLD = 3;
+function downgradeFinisher(caseId){
+    try {
+        if(!caseId) return;
+        const cls = ALG_CLASS?.[caseId];
+        if(cls && cls.classification === 'finisher'){
+            cls.classification = 'setup';
+            console.log(`🔻 Downgrading finisher case ${caseId} to setup after repeated non-completions`);
+        }
+    } catch(e) {}
+}
+
+// Planner BFS (shallow multi-step completion attempt) – targets plateau patterns
+function plannerSearchCompletion(startState, { maxDepth=5, composite=false } = {}){
+    const baseMoves = ['R','R\'','U','U\'','F','F\'','r','r\'','f','f\'','U2','R2','F2'];
+    // Optional composite (2-move) seeds to widen frontier early
+    const compositeSeeds = !composite ? [] : [
+        ['R','U'],['R','U\''],['U','R'],['U\'','R'],
+        ['F','R'],['R','F\''],['r','U'],['r','U\''],
+        ['f','R'],['R','f\''],['R','F'],['F','U'],['U','F'],
+        ['R','U2'],['U2','R'],['R2','U'],['U','R2']
+    ];
+    const queue = [{ seq: [], state: cloneCubeState(startState) }];
+    const seen = new Set();
+    const startPattern = getOLLPattern(startState);
+    seen.add(startPattern + '|');
+    const LIMIT = 2000;
+    let explored = 0;
+    if(compositeSeeds.length){
+        for(const seed of compositeSeeds){
+            const seeded = cloneCubeState(startState);
+            applyMoveSequence3x3(seeded, parseMoveNotation3x3(seed.join(' ')));
+            const patt = getOLLPattern(seeded);
+            const key = patt + '|' + seed.length;
+            if(seen.has(key)) continue;
+            seen.add(key);
+            queue.push({ seq:[...seed], state: seeded });
+        }
+    }
+    while(queue.length){
+        const { seq, state } = queue.shift();
+        if(seq.length > 0){
+            const a = analyzeOLLState(state);
+            if(a.isComplete){
+                return { success:true, algorithm: seq.join(' ') };
+        }
+        }
+        if(seq.length === maxDepth) continue;
+        for(const mv of baseMoves){
+            const nextState = cloneCubeState(state);
+            applyMoveSequence3x3(nextState, parseMoveNotation3x3(mv));
+            const patt = getOLLPattern(nextState);
+            const key = patt + '|' + seq.length;
+            if(seen.has(key)) continue;
+            seen.add(key);
+            queue.push({ seq: [...seq, mv], state: nextState });
+            explored++;
+            if(explored > LIMIT) return { success:false };
+        }
+    }
+    return { success:false };
+}
 
 // ========================= MOVE NOTATION PARSER =========================
 
@@ -1662,6 +1761,50 @@ export function registerOLLCase({ id, pattern, algorithm, name, verified=true, n
     return entry;
 }
 
+// Runtime capture of previously unseen patterns (adds to database + derived file)
+function captureUnknownOLLPattern(pattern, workingState, helpers){
+    try {
+        if(!pattern || pattern.length !== 8) return;
+        if(OLL_CASES.find(c => c.pattern === pattern)) return; // already known
+        // Choose new id in 9100+ range to avoid conflict with 8000 derived & 901 placeholders
+        let newId = 9100;
+        while(OLL_CASES.some(c => c.id === newId)) newId++;
+        let algorithm = '';
+        let verified = false;
+        // Attempt heuristic discovery if available
+        const { ensureHeuristicImports, heuristicSearchOLLFn, parseMoveNotation3x3, applyMoveSequence3x3, cloneCubeState, analyzeOLLState } = helpers || {};
+        if(ensureHeuristicImports){ ensureHeuristicImports(); }
+        if(heuristicSearchOLLFn){
+            try {
+                const searchRes = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth:14, allowRegression:2 });
+                if(searchRes?.success && searchRes.algorithm){
+                    const testState = cloneCubeState(workingState);
+                    applyMoveSequence3x3(testState, parseMoveNotation3x3(searchRes.algorithm));
+                    const after = analyzeOLLState(testState);
+                    if(after.isComplete){
+                        algorithm = searchRes.algorithm;
+                        verified = true;
+                    }
+                }
+            } catch(e){ /* ignore heuristic errors */ }
+        }
+        const entry = { id:newId, pattern, algorithm, name:`Auto-Captured ${pattern}`, verified, testCaseProven: verified? 'Heuristic auto-complete validation' : 'Captured - pending algorithm', notes:'auto-captured-runtime' };
+        OLL_CASES.push(entry);
+        // Persist into derived file for future sessions
+        try {
+            const derivedPath = resolve(process.cwd(), 'backend', 'data', 'oll-derived.json');
+            let store = { derived: [] };
+            if(existsSync(derivedPath)){
+                try { store = JSON.parse(readFileSync(derivedPath,'utf8')) || { derived: [] }; } catch(e){ store = { derived: [] }; }
+            }
+            store.derived = store.derived || [];
+            store.derived.push({ id:newId, pattern, algorithm, name: entry.name, source: verified? 'auto-heuristic' : 'auto-captured' });
+            writeFileSync(derivedPath, JSON.stringify(store,null,2));
+        } catch(e){ /* ignore persist errors */ }
+        console.log(`[OLL] Captured new OLL pattern ${pattern} as id ${newId}${verified? ' with solver' : ''}`);
+    } catch(e){ /* silent */ }
+}
+
 // ==== AUTO-LOAD DERIVED OLL CASES (if provenance file exists) ====
 try {
     const derivedPath = resolve(process.cwd(), 'backend', 'data', 'oll-derived.json');
@@ -1830,6 +1973,147 @@ export function solveOLL(cubeState) {
     const orientationHistory = [];
     const snapshotState = cloneCubeState(workingState); // baseline snapshot
     const f2lSignature = makeF2LSignature(workingState); // integrity baseline
+    // NEW: canonical pattern visited tracking to avoid loops produced by partial algorithms
+    const visitedCanonicalPatterns = new Set();
+    const heuristicTried = new Set(); // canonical patterns we've already attempted heuristic finisher on
+    const blacklistedAlgorithms = new Set(); // algorithms that violated integrity this session
+    const runtimeFinishers = global.__OLL_RUNTIME_FINISHERS || {}; // persisted across runs
+    const plateauCounts = {}; // canonicalPattern -> plateau hit count
+    const canonicalRepeatCounts = {}; // canonicalPattern -> total repeats (regardless of improvement)
+    const algoPatternSessionBlacklist = new Set(); // entries: caseId|pattern or alg|pattern
+    // Adaptive integrity control & promotion bookkeeping
+    let cumulativeIntegrityDiff = 0; // accumulated accepted soft diffs this OLL session
+    const setupSolveConfirmations = {}; // canonicalPattern -> confirmation count for promotion
+    const PROMOTION_CONFIRMATIONS = 2;
+    const adaptiveIntegrityConfig = { base:4, highOrientation:6, highOrientationThreshold:6, cumulativeBudget:8 };
+    // Per-pattern integrity overrides (by canonical pattern key) allowing more diff tolerance for stubborn cases
+    // Rationale: Certain patterns (e.g., Anti-Sune variants, frequently looping 9001/9100 captures) require
+    // slightly higher permissible diff to accept beneficial partial orientation changes without rollback.
+    // Structure: canonicalKey -> { base?, high?, budgetMultiplier? }
+    const PATTERN_INTEGRITY_OVERRIDES = global.__OLL_PATTERN_INTEGRITY_OVERRIDES || {
+        // Example stubborn patterns (these keys will be filled once canonicalizePatternFn runs).
+        // We'll patch in literal pattern strings if known; otherwise they can be populated dynamically
+        // at runtime via promotion logic (not yet implemented here) by assigning to global.__OLL_PATTERN_INTEGRITY_OVERRIDES.
+        // 'canonical_example': { base:5, high:7, budgetMultiplier:1.25 }
+    };
+    global.__OLL_PATTERN_INTEGRITY_OVERRIDES = PATTERN_INTEGRITY_OVERRIDES;
+    // Setup chaining window
+    let setupChainDepth = 0; // consecutive accepted setup algs
+    const MAX_SETUP_CHAIN = 2; // allow up to 2 chained setups before counting stagnation harshly
+    const setupChainPatterns = new Set();
+    const integrityViolationCounts = {}; // key: canonicalKey -> count (used to trigger mini planner)
+    const STATIC_FINISHERS = {
+        '01111010': "r U R' U' r' F R F'",
+        '01111111': "R U R' U' R' F R F'",
+        '01011111': "R U R' U R U2 R' F R U R' U' F'",
+        '01011010': "F R U R' U' F' U R U2 R' U' R U' R'",
+        '11001010': "F R' F' R U R U' R'",
+        '11011000': "r U R' U' r' R U R U' R'"
+    };
+
+    // -------- Algorithm Classification (cached) --------
+    // We'll classify each OLL case algorithm as FINISHER if it reliably completes OLL
+    // when applied after its own inverse (i.e., algorithm + inverse-alg scrambled state).
+    // Otherwise categorize as SETUP if it improves orientation.
+    if(!global.__OLL_ALG_CLASSIFICATION){
+        global.__OLL_ALG_CLASSIFICATION = {};
+        // Load persisted dynamic overrides first
+        try {
+            const dynPath = resolve(process.cwd(), 'backend', 'data', 'oll-classification-dynamic.json');
+            if(existsSync(dynPath)){
+                const dyn = JSON.parse(readFileSync(dynPath,'utf8'));
+                Object.assign(global.__OLL_ALG_CLASSIFICATION, dyn);
+                console.log(`[OLL] Loaded dynamic classification overrides (${Object.keys(dyn).length})`);
+            }
+        } catch(e){ /* ignore */ }
+        try {
+            const tmpSolved = createSolvedCube('3x3x3');
+            // helper to invert a move token
+            const invertMove = m => {
+                if(m.endsWith("2")) return m; // 180 stays
+                if(m.endsWith("'")) return m.slice(0,-1);
+                return m + "'";
+            };
+            for(const c of OLL_CASES){
+                if(!c.algorithm) continue;
+                try {
+                    const algTokens = c.algorithm.trim().split(/\s+/).filter(Boolean);
+                    if(!algTokens.length) continue;
+                    const inverseTokens = algTokens.slice().reverse().map(invertMove);
+                    const testCube = cloneCubeState(tmpSolved);
+                    applyMoveSequence3x3(testCube, parseMoveNotation3x3(inverseTokens.join(' ')));
+                    const initialPattern = getOLLPattern(testCube);
+                    const initialScore = (initialPattern.match(/1/g)||[]).length;
+                    applyMoveSequence3x3(testCube, parseMoveNotation3x3(c.algorithm));
+                    const finalPattern = getOLLPattern(testCube);
+                    const finalScore = (finalPattern.match(/1/g)||[]).length;
+                    const isComplete = finalPattern === '11111111';
+                    let classification = 'unknown';
+                    if(isComplete) classification = 'finisher';
+                    else if(finalScore > initialScore) classification = 'setup';
+                    if(!global.__OLL_ALG_CLASSIFICATION[c.id]){
+                        global.__OLL_ALG_CLASSIFICATION[c.id] = { classification, initialScore, finalScore };
+                    }
+                } catch(e){
+                    if(!global.__OLL_ALG_CLASSIFICATION[c.id]) global.__OLL_ALG_CLASSIFICATION[c.id] = { classification: 'error' };
+                }
+            }
+        } catch(e){ /* ignore classification errors */ }
+        // Batch metrics-driven demotion (executed once per process) to clean misclassified finishers
+        try {
+            if(!global.__OLL_BATCH_RECLASSIFIED){
+                global.__OLL_BATCH_RECLASSIFIED = true;
+                if(existsSync(OLL_METRICS_PATH)){
+                    const lines = readFileSync(OLL_METRICS_PATH,'utf8').split(/\n+/).filter(Boolean);
+                    const agg = {};
+                    for(const line of lines){
+                        try {
+                            const rec = JSON.parse(line);
+                            if(!rec.caseId || rec.caseId==='planner' || rec.caseId==='heuristic') continue;
+                            agg[rec.caseId] = agg[rec.caseId] || { attempts:0, completions:0, improvements:0 };
+                            agg[rec.caseId].attempts++;
+                            if(rec.complete) agg[rec.caseId].completions++;
+                            if(rec.improved) agg[rec.caseId].improvements++;
+                        } catch(e){ /* ignore */ }
+                    }
+                    for(const id of Object.keys(agg)){
+                        const s = agg[id];
+                        const rec = global.__OLL_ALG_CLASSIFICATION[id];
+                        if(!rec) continue;
+                        if(rec.classification==='finisher' && s.attempts>=5 && s.completions===0){
+                            const improvementRate = s.improvements / s.attempts;
+                            if(improvementRate < 0.2){
+                                rec.classification='setup';
+                                rec.autoDemoted=true;
+                                rec.autoDemoteReason='Batch metrics demotion (0% completion, low improvement)';
+                                console.log(`🔻 Batch-demoted OLL case ${id} via metrics`);
+                            }
+                        }
+                    }
+                    try { writeFileSync(resolve(DATA_DIR,'oll-classification-dynamic.json'), JSON.stringify(global.__OLL_ALG_CLASSIFICATION,null,2)); } catch(e){}
+                }
+            }
+        } catch(e){ /* ignore */ }
+    }
+    const ALG_CLASS = global.__OLL_ALG_CLASSIFICATION;
+    // Lazy load canonicalization + heuristic to avoid circular deps if any
+    let canonicalizePatternFn; let heuristicSearchOLLFn; let orientationScoreFn; let adaptAlgorithmForRotationFn;
+    function ensureHeuristicImports(){
+        if(!canonicalizePatternFn){
+            try {
+                const mod = require('../utils/ollCanonical.js');
+                canonicalizePatternFn = mod.canonicalizePattern || mod.default?.canonicalizePattern;
+                orientationScoreFn = mod.orientationScore || mod.default?.orientationScore;
+                adaptAlgorithmForRotationFn = mod.adaptAlgorithmForRotation || mod.default?.adaptAlgorithmForRotation;
+            } catch(e){ /* ignore */ }
+        }
+        if(!heuristicSearchOLLFn){
+            try {
+                const searchMod = require('../search/ollHeuristicSearch.js');
+                heuristicSearchOLLFn = searchMod.heuristicSearchOLL || searchMod.default?.heuristicSearchOLL;
+            } catch(e){ /* ignore */ }
+        }
+    }
     
     while (attempts < maxAttempts) {
         const analysis = analyzeOLLState(workingState);
@@ -1839,20 +2123,108 @@ export function solveOLL(cubeState) {
             break;
         }
         
-        // Track progress - count oriented pieces
-        const currentOrientationScore = (analysis.pattern.match(/1/g) || []).length;
+        // Track progress - count oriented pieces (use orientationScore util if available)
+        let currentOrientationScore;
+        if(!orientationScoreFn){ ensureHeuristicImports(); }
+        if(orientationScoreFn){
+            try { currentOrientationScore = orientationScoreFn(analysis.pattern); } catch(e){ currentOrientationScore = (analysis.pattern.match(/1/g) || []).length; }
+        } else {
+            currentOrientationScore = (analysis.pattern.match(/1/g) || []).length;
+        }
+
+        // Canonical pattern check; if we've seen this canonical pattern before with no improvement, invoke heuristic fallback early
+        let canonicalKey = null;
+        if(!canonicalizePatternFn){ ensureHeuristicImports(); }
+        if(canonicalizePatternFn){
+            try { canonicalKey = canonicalizePatternFn(analysis.pattern).canonical; } catch(e){ canonicalKey = null; }
+        }
+        if(canonicalKey){
+            if(!visitedCanonicalPatterns.has(canonicalKey)){
+                visitedCanonicalPatterns.add(canonicalKey);
+            }
+            if(plateauCounts[canonicalKey] === undefined) plateauCounts[canonicalKey] = 0;
+        }
+        // EARLY MICRO-FINISHER: if near-complete (>=7 oriented) attempt shallow heuristic finisher once per canonical pattern
+        if(!analysis.isComplete && currentOrientationScore >= 7 && canonicalKey){
+            if(!heuristicTried.has(canonicalKey)){
+                ensureHeuristicImports();
+                if(heuristicSearchOLLFn){
+                    const hFinish = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 6 });
+                    if(hFinish?.success && hFinish.algorithm){
+                        console.log(`🧠 Micro-finisher heuristic solved OLL: ${hFinish.algorithm}`);
+                        const parsedMF = parseMoveNotation3x3(hFinish.algorithm);
+                        applyMoveSequence3x3(workingState, parsedMF);
+                        totalMoves += parsedMF.length;
+                        appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic Micro-Finisher', algorithm: hFinish.algorithm, moves: parsedMF.length });
+                        const postMF = analyzeOLLState(workingState);
+                        if(postMF.isComplete){
+                            attempts++; // count heuristic as attempt
+                            break;
+                        }
+                    }
+                    heuristicTried.add(canonicalKey);
+                }
+            }
+        }
+        // MID-STAGE HEURISTIC: if moderately oriented (>=6) and stagnating once, try a heuristic search before algorithm selection
+        if(!analysis.isComplete && currentOrientationScore >=6 && stagnationCounter === 1 && canonicalKey && !heuristicTried.has(canonicalKey)){
+            ensureHeuristicImports();
+            if(heuristicSearchOLLFn){
+                const hMid = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 10, allowRegression:2, moves: ['R','R\'','R2','U','U\'','U2','F','F\'','F2','r','r\'','r2','f','f\'','f2'] });
+                if(hMid?.success && hMid.algorithm){
+                    console.log(`🧠 Mid-stage heuristic solved OLL: ${hMid.algorithm}`);
+                    const parsedHM = parseMoveNotation3x3(hMid.algorithm);
+                    applyMoveSequence3x3(workingState, parsedHM);
+                    totalMoves += parsedHM.length;
+                    appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic Mid-Stage', algorithm: hMid.algorithm, moves: parsedHM.length });
+                    const postHM = analyzeOLLState(workingState);
+                    if(postHM.isComplete){
+                        attempts++;
+                        break;
+                    }
+                }
+                heuristicTried.add(canonicalKey);
+            }
+        }
         if (currentOrientationScore > bestOrientationScore) {
             bestOrientationScore = currentOrientationScore;
             progressMade = true;
             stagnationCounter = 0;
         } else {
+            // Only increment stagnation if orientation score did not increase AND pattern canonical key repeats
+            if(canonicalKey){
+                plateauCounts[canonicalKey] = plateauCounts[canonicalKey] || 0; // ensure init
+            }
             stagnationCounter++;
+            // Before aborting due to stagnation, attempt heuristic search fallback exactly once at threshold-1
+            if (stagnationCounter === stagnationLimit - 1 && !analysis.isComplete) {
+                ensureHeuristicImports();
+                if(heuristicSearchOLLFn){
+                    const hResult = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 12, allowRegression:2, moves: ['R','R\'','R2','U','U\'','U2','F','F\'','F2','r','r\'','r2','f','f\'','f2'] });
+                    if(hResult?.success && hResult.algorithm){
+                        console.log(`🧠 Heuristic fallback succeeded: ${hResult.algorithm}`);
+                        const parsedH = parseMoveNotation3x3(hResult.algorithm);
+                        applyMoveSequence3x3(workingState, parsedH);
+                        totalMoves += parsedH.length;
+                        appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic Finisher', algorithm: hResult.algorithm, moves: parsedH.length });
+                        const postH = analyzeOLLState(workingState);
+                        if(postH.isComplete){
+                            bestOrientationScore = 8;
+                            attempts++; // count as attempt
+                            break; // solved
+                        }
+                    }
+                }
+            }
             if (stagnationCounter >= stagnationLimit) {
                 console.log('⚠️ Stagnation detected in OLL solving, aborting to avoid destructive loops');
-                break;
+                break; // exit main loop
             }
         }
         orientationHistory.push({ attempt: attempts, pattern: analysis.pattern, score: currentOrientationScore });
+        if(canonicalKey){
+            canonicalRepeatCounts[canonicalKey] = (canonicalRepeatCounts[canonicalKey]||0) + 1;
+        }
         
         // Get algorithm for current case - prioritize verified fallback algorithms
         let algorithmToApply = null;
@@ -1860,20 +2232,18 @@ export function solveOLL(cubeState) {
         
         // ENHANCED PATTERN MATCHING - Use comprehensive OLL database first
         // Try exact pattern match in comprehensive database
-        let matchedCase = OLL_CASES.find(ollCase => ollCase.pattern === analysis.pattern);
+    let matchedCase = OLL_CASES.find(ollCase => ollCase.pattern === analysis.pattern);
+    let rotationApplied = 0;
         
         // Try rotated pattern matching (check all 4 rotations)
         if (!matchedCase) {
             for (let rotation = 1; rotation < 4; rotation++) {
                 const rotatedPattern = rotatePattern(analysis.pattern, rotation);
-                matchedCase = OLL_CASES.find(ollCase => ollCase.pattern === rotatedPattern);
-                if (matchedCase) {
-                    console.log(`Found match with ${rotation * 90}° rotation: ${matchedCase.name}`);
-                    // Apply U move to align the pattern
-                    const alignMoves = 'U '.repeat(rotation);
-                    const alignParsed = parseMoveNotation3x3(alignMoves);
-                    applyMoveSequence3x3(workingState, alignParsed);
-                    totalMoves += alignParsed.length;
+                const candidate = OLL_CASES.find(ollCase => ollCase.pattern === rotatedPattern);
+                if (candidate) {
+                    matchedCase = candidate;
+                    rotationApplied = rotation; // remember rotation, we'll adapt algorithm (no physical U moves)
+                    console.log(`Found match via virtual rotation ${rotation * 90}°: ${matchedCase.name}`);
                     break;
                 }
             }
@@ -1903,11 +2273,33 @@ export function solveOLL(cubeState) {
         if (matchedCase && matchedCase.algorithm) {
             algorithmToApply = matchedCase.algorithm;
             caseName = matchedCase.name;
+            const classificationInfo = ALG_CLASS?.[matchedCase.id];
+            if(classificationInfo){
+                if(classificationInfo.classification === 'setup') caseName += ' (Setup)';
+                else if(classificationInfo.classification === 'finisher') caseName += ' (Finisher)';
+            }
+            // Adapt algorithm for rotation instead of physically rotating cube
+            if(rotationApplied && adaptAlgorithmForRotationFn){
+                algorithmToApply = adaptAlgorithmForRotationFn(algorithmToApply, rotationApplied, 'pre');
+                caseName += ` [+rot${rotationApplied}]`;
+            }
             console.log(`✅ Found OLL case: ${caseName} (ID: ${matchedCase.id})`);
             console.log(`🎯 Algorithm: ${algorithmToApply}`);
+            // Session blacklist check to avoid repeating same failing finisher on identical pattern
+            const blkKey = `${matchedCase.id}|${analysis.pattern}`;
+            if(algoPatternSessionBlacklist.has(blkKey)){
+                console.log('⛔ Skipping blacklisted (session) case-pattern combination, forcing heuristic escalation');
+                algorithmToApply = null; // force fallback path later
+            }
+        } else if (canonicalKey && (runtimeFinishers[canonicalKey] || STATIC_FINISHERS[canonicalKey])) {
+            algorithmToApply = runtimeFinishers[canonicalKey] || STATIC_FINISHERS[canonicalKey];
+            caseName = runtimeFinishers[canonicalKey] ? 'Runtime Finisher (Heuristic Learned)' : 'Static Finisher Table';
+            console.log(`🧵 Applying plateau finisher for ${canonicalKey}: ${algorithmToApply}`);
         } else if (attempts < 3) {
             // Only try setup moves for first few attempts
             console.warn('Unknown OLL pattern:', analysis.pattern);
+            // Auto-capture unknown pattern into database for future runs
+            captureUnknownOLLPattern(analysis.pattern, workingState, { ensureHeuristicImports, heuristicSearchOLLFn, parseMoveNotation3x3, applyMoveSequence3x3, cloneCubeState, analyzeOLLState });
             const setupMoves = ["F R U R' U' F'", "R U R' U R U2 R'", "F U R U' R' F'"];
             const setupAlg = setupMoves[attempts % setupMoves.length];
             algorithmToApply = setupAlg;
@@ -1944,35 +2336,300 @@ export function solveOLL(cubeState) {
             } catch (e) {}
         }
         
-    // Apply the algorithm
+    // Apply the algorithm (or escalate if null due to blacklist)
+        if(!algorithmToApply){
+            ensureHeuristicImports();
+            if(heuristicSearchOLLFn){
+                const hBlk = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 12, allowRegression:2 });
+                if(hBlk?.success && hBlk.algorithm){
+                    console.log(`🔄 Heuristic substitution for blacklisted algorithm: ${hBlk.algorithm}`);
+                    const pmBlk = parseMoveNotation3x3(hBlk.algorithm);
+                    applyMoveSequence3x3(workingState, pmBlk);
+                    totalMoves += pmBlk.length;
+                    appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic (Blacklist Substitution)', algorithm: hBlk.algorithm, moves: pmBlk.length, classification: 'heuristic' });
+                    const paBlk = analyzeOLLState(workingState);
+                    if(paBlk.isComplete) break;
+                    attempts++;
+                    continue;
+                }
+            }
+            attempts++;
+            continue;
+        }
         const parsedMoves = parseMoveNotation3x3(algorithmToApply);
+        if(blacklistedAlgorithms.has(algorithmToApply)){
+            console.log('⛔ Skipping blacklisted algorithm, invoking heuristic instead');
+            ensureHeuristicImports();
+            if(heuristicSearchOLLFn){
+                const hSkip = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 10 });
+                if(hSkip?.success && hSkip.algorithm){
+                    const pm = parseMoveNotation3x3(hSkip.algorithm);
+                    applyMoveSequence3x3(workingState, pm);
+                    totalMoves += pm.length;
+                    appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic (Blacklist Bypass)', algorithm: hSkip.algorithm, moves: pm.length });
+                    const pa = analyzeOLLState(workingState);
+                    if(pa.isComplete) break;
+                    attempts++;
+                    continue;
+                }
+            }
+            // If heuristic not available just count attempt and continue
+            attempts++;
+            continue;
+        }
         applyMoveSequence3x3(workingState, parsedMoves);
+        const prePattern = analysis.pattern;
         
         totalMoves += parsedMoves.length;
+        const classificationLabel = caseName.includes('(Finisher)') ? 'finisher' : (caseName.includes('(Setup)') ? 'setup' : 'unknown');
         appliedAlgorithms.push({
             case: analysis.matchedCase?.id || 'unknown',
             name: caseName,
             algorithm: algorithmToApply,
-            moves: parsedMoves.length
+            moves: parsedMoves.length,
+            classification: classificationLabel
         });
         
         // Check immediately if OLL is now complete
         const postAnalysis = analyzeOLLState(workingState);
         // Decide if we enforce integrity (only for unknown / fallback / emergency attempts)
         const enforceIntegrity = (caseName.includes('Setup') || caseName.includes('Emergency') || caseName.includes('fallback') || caseName === 'Unknown OLL Case');
+        let integrityStatus = 'n/a';
+        let integrityDiff = null;
         if (enforceIntegrity) {
             const integrity = verifyF2LIntegrity(f2lSignature, workingState);
+            integrityDiff = integrity.diff;
             if (!integrity.ok) {
-                console.warn('🚨 F2L integrity violation detected after UNKNOWN pattern attempt – reverting this attempt');
-                // revert to snapshot (not aborting entire OLL; allow next attempt)
-                Object.keys(snapshotState.faces).forEach(face => {
-                    workingState.faces[face] = [...snapshotState.faces[face]];
-                });
-                attempts++; // count this attempt
-                continue; // try another approach
+                // Determine adaptive threshold
+                const preScoreTmp = (prePattern.match(/1/g)||[]).length;
+                const postScoreTmp = postAnalysis.totalOriented;
+                const improvedOrientation = postScoreTmp > preScoreTmp;
+                let allowed = (postScoreTmp >= adaptiveIntegrityConfig.highOrientationThreshold)
+                    ? adaptiveIntegrityConfig.highOrientation
+                    : adaptiveIntegrityConfig.base;
+                // Apply per-pattern override if available (based on canonicalKey from earlier in loop scope)
+                if(canonicalKey && PATTERN_INTEGRITY_OVERRIDES[canonicalKey]){
+                    const ov = PATTERN_INTEGRITY_OVERRIDES[canonicalKey];
+                    if(postScoreTmp >= adaptiveIntegrityConfig.highOrientationThreshold && ov.high){
+                        allowed = ov.high;
+                    } else if(ov.base){
+                        allowed = ov.base;
+                    }
+                }
+                const budgetCap = (()=>{
+                    if(canonicalKey && PATTERN_INTEGRITY_OVERRIDES[canonicalKey]?.budgetMultiplier){
+                        return adaptiveIntegrityConfig.cumulativeBudget * PATTERN_INTEGRITY_OVERRIDES[canonicalKey].budgetMultiplier;
+                    }
+                    return adaptiveIntegrityConfig.cumulativeBudget;
+                })();
+                const withinBudget = (cumulativeIntegrityDiff + integrity.diff) <= budgetCap;
+                if(improvedOrientation && integrity.diff <= allowed && withinBudget){
+                    cumulativeIntegrityDiff += integrity.diff;
+                    console.warn(`⚠️ Soft F2L deviation tolerated (diff=${integrity.diff}, cum=${cumulativeIntegrityDiff}/${withinBudget?budgetCap:budgetCap}) allowed=${allowed} due to orientation gain ${preScoreTmp}->${postScoreTmp}${canonicalKey&&PATTERN_INTEGRITY_OVERRIDES[canonicalKey]?' [override]':''}`);
+                    integrityStatus = 'soft';
+                } else {
+                    console.warn('🚨 F2L integrity violation detected after UNKNOWN pattern attempt – reverting this attempt');
+                    Object.keys(snapshotState.faces).forEach(face => { workingState.faces[face] = [...snapshotState.faces[face]]; });
+                    blacklistedAlgorithms.add(algorithmToApply);
+                    appliedAlgorithms.pop();
+                    attempts++;
+                    integrityStatus = 'reverted';
+                    recordOLLMetric({
+                        attempt: attempts,
+                        caseId: analysis.matchedCase?.id || 'unknown',
+                        caseName,
+                        classification: classificationLabel,
+                        algorithm: algorithmToApply,
+                        rotationApplied,
+                        prePattern,
+                        postPattern: null,
+                        improved: false,
+                        complete: false,
+                        integrityStatus: 'reverted',
+                        integrityDiff: integrity.diff,
+                        cumulativeIntegrityDiff
+                    });
+                    continue;
+                }
+            } else {
+                integrityStatus = 'ok';
+                integrityDiff = integrity.diff;
             }
         }
-        console.log(`   Post-algorithm analysis: Pattern=${postAnalysis.pattern}, Complete=${postAnalysis.isComplete}`);
+        const postPattern = postAnalysis.pattern;
+        const improved = (postPattern.match(/1/g)||[]).length > (prePattern.match(/1/g)||[]).length;
+        console.log(`   Post-algorithm analysis: Pattern=${postPattern}, Complete=${postAnalysis.isComplete}, Improved=${improved}`);
+        // Record metric
+        recordOLLMetric({
+            attempt: attempts,
+            caseId: analysis.matchedCase?.id || 'unknown',
+            caseName,
+            classification: classificationLabel,
+            algorithm: algorithmToApply,
+            rotationApplied,
+            prePattern,
+            postPattern,
+            improved,
+            complete: postAnalysis.isComplete,
+            integrityStatus,
+            integrityDiff,
+            cumulativeIntegrityDiff,
+            stagnationCounter,
+            plateauHits: canonicalKey ? plateauCounts[canonicalKey]||0 : 0
+        });
+        // Promotion: if a setup algorithm solved OLL immediately (orientation jump to 8) track confirmations and promote to runtime finisher after threshold
+        if(postAnalysis.isComplete && classificationLabel === 'setup' && canonicalKey){
+            setupSolveConfirmations[canonicalKey] = (setupSolveConfirmations[canonicalKey]||0)+1;
+            if(setupSolveConfirmations[canonicalKey] >= PROMOTION_CONFIRMATIONS && !runtimeFinishers[canonicalKey]){
+                runtimeFinishers[canonicalKey] = algorithmToApply;
+                console.log(`🚀 Promoted setup to runtime finisher for ${canonicalKey}: ${algorithmToApply}`);
+                try { writeFileSync(RUNTIME_FINISHERS_PATH, JSON.stringify(runtimeFinishers,null,2)); } catch(e){}
+            }
+        }
+        // Track finisher failures
+        if(classificationLabel === 'finisher' && !postAnalysis.isComplete){
+            const keyFail = analysis.matchedCase?.id || canonicalKey || algorithmToApply;
+            finisherFailureCounts[keyFail] = (finisherFailureCounts[keyFail]||0) + 1;
+            if(finisherFailureCounts[keyFail] >= FINISHER_DOWNGRADE_THRESHOLD){
+                downgradeFinisher(analysis.matchedCase?.id);
+            }
+            // Add to session blacklist after two immediate non-improving repeats
+            if(finisherFailureCounts[keyFail] >= 2){
+                const blkKey = `${analysis.matchedCase?.id||algorithmToApply}|${prePattern}`;
+                algoPatternSessionBlacklist.add(blkKey);
+            }
+        }
+        // Setup chaining logic: allow limited consecutive improving setups without burning attempts/stagnation
+        if(!postAnalysis.isComplete && caseName.includes('(Setup)')){
+            const newScore = (postAnalysis.pattern.match(/1/g)||[]).length;
+            if(newScore > currentOrientationScore){
+                if(setupChainDepth < MAX_SETUP_CHAIN){
+                    setupChainDepth++;
+                    setupChainPatterns.add(postPattern);
+                    console.log(`🔁 Chaining setup (${setupChainDepth}/${MAX_SETUP_CHAIN}) after improvement`);
+                    // Do NOT increment attempts; also relax stagnation by decrementing counter if >0
+                    if(stagnationCounter>0) stagnationCounter--;
+                    continue;
+                }
+            } else {
+                // reset chain if no improvement
+                setupChainDepth = 0;
+            }
+        } else if(caseName.includes('(Finisher)') || postAnalysis.isComplete){
+            setupChainDepth = 0; // reset on finisher or completion
+        }
+        // If we applied a finisher but not solved, escalate heuristic immediately (unexpected)
+        if(!postAnalysis.isComplete && caseName.includes('(Finisher)')){
+            ensureHeuristicImports();
+            if(heuristicSearchOLLFn){
+                const hEsc = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 14, allowRegression:2, moves: ['R','R\'','R2','U','U\'','U2','F','F\'','F2','r','r\'','r2','f','f\'','f2'] });
+                if(hEsc?.success && hEsc.algorithm){
+                    console.log(`🧠 Escalation heuristic after failed finisher: ${hEsc.algorithm}`);
+                    const pm2 = parseMoveNotation3x3(hEsc.algorithm);
+                    applyMoveSequence3x3(workingState, pm2);
+                    totalMoves += pm2.length;
+                    appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic Escalation', algorithm: hEsc.algorithm, moves: pm2.length, classification: 'heuristic' });
+                    const postEsc = analyzeOLLState(workingState);
+                    if(postEsc.isComplete){
+                        attempts++;
+                        break;
+                    }
+                }
+            }
+        }
+        // Plateau tracking & escalation
+        if(!postAnalysis.isComplete && canonicalKey){
+            const newScore = (postAnalysis.pattern.match(/1/g)||[]).length;
+            if(newScore <= currentOrientationScore){
+                plateauCounts[canonicalKey] = (plateauCounts[canonicalKey]||0) + 1;
+            } else {
+                plateauCounts[canonicalKey] = 0;
+            }
+            // Earlier plateau escalation trigger lowered from 2 to 1
+            if(plateauCounts[canonicalKey] >= 1){
+                // Attempt static finisher if not already used
+                if(STATIC_FINISHERS[canonicalKey] && algorithmToApply !== STATIC_FINISHERS[canonicalKey]){
+                    console.log(`🪁 Plateau escalation (static finisher) for ${canonicalKey}`);
+                    const pFin = parseMoveNotation3x3(STATIC_FINISHERS[canonicalKey]);
+                    applyMoveSequence3x3(workingState, pFin);
+                    totalMoves += pFin.length;
+                    appliedAlgorithms.push({ case: 'plateau', name: 'Static Plateau Finisher', algorithm: STATIC_FINISHERS[canonicalKey], moves: pFin.length, classification: 'finisher' });
+                    const postFin = analyzeOLLState(workingState);
+                    if(postFin.isComplete){
+                        console.log('✅ Static plateau finisher solved OLL');
+                        attempts++;
+                        break;
+                    } else {
+                        const pfScore = (postFin.pattern.match(/1/g)||[]).length;
+                        if(pfScore > newScore){
+                            console.log('🔁 Continuing after plateau finisher improvement');
+                            continue;
+                        }
+                    }
+                } else {
+                    ensureHeuristicImports();
+                    if(heuristicSearchOLLFn){
+                        console.log('🧪 Plateau heuristic search (expanded moves)');
+                        const hPlat = heuristicSearchOLLFn(cloneCubeState(workingState), { maxDepth: 14, allowRegression:2, moves: ['R','R\'','R2','U','U\'','U2','F','F\'','F2','r','r\'','r2','f','f\'','f2'] });
+                        if(hPlat?.success && hPlat.algorithm){
+                            const pmP = parseMoveNotation3x3(hPlat.algorithm);
+                            applyMoveSequence3x3(workingState, pmP);
+                            totalMoves += pmP.length;
+                            appliedAlgorithms.push({ case: 'heuristic', name: 'Heuristic Plateau Finisher', algorithm: hPlat.algorithm, moves: pmP.length, classification: 'finisher' });
+                            const postHP = analyzeOLLState(workingState);
+                            if(postHP.isComplete){
+                                console.log('✅ Heuristic plateau finisher solved OLL');
+                                runtimeFinishers[canonicalKey] = hPlat.algorithm;
+                                attempts++;
+                                break;
+                            } else {
+                                const hpScore = (postHP.pattern.match(/1/g)||[]).length;
+                                if(hpScore > newScore){
+                                    runtimeFinishers[canonicalKey] = hPlat.algorithm;
+                                    continue;
+                                }
+                            }
+                        }
+                        // If still not complete after heuristic plateau attempt OR repeat count high, invoke planner BFS
+                        if(!analyzeOLLState(workingState).isComplete || (canonicalRepeatCounts[canonicalKey] >= 3)){
+                            console.log('🗺️ Attempting planner BFS for completion (depth<=5)');
+                            const planner = plannerSearchCompletion(workingState, { maxDepth:5 });
+                            if(planner.success && planner.algorithm){
+                                console.log(`🗺️ Planner found completion sequence: ${planner.algorithm}`);
+                                const pMoves = parseMoveNotation3x3(planner.algorithm);
+                                applyMoveSequence3x3(workingState, pMoves);
+                                totalMoves += pMoves.length;
+                                appliedAlgorithms.push({ case: 'planner', name: 'Planner Completion', algorithm: planner.algorithm, moves: pMoves.length, classification: 'finisher' });
+                                const postPlan = analyzeOLLState(workingState);
+                                recordOLLMetric({ attempt: attempts, caseId: 'planner', caseName: 'Planner Completion', classification: 'finisher', algorithm: planner.algorithm, rotationApplied:0, prePattern: postPattern, postPattern: postPlan.pattern, improved: (postPlan.pattern.match(/1/g)||[]).length > (postPattern.match(/1/g)||[]).length, complete: postPlan.isComplete });
+                                if(postPlan.isComplete){
+                                    runtimeFinishers[canonicalKey] = planner.algorithm; // learn
+                                    attempts++;
+                                    break;
+                                }
+                                // Escalate deeper planner if still unsolved and plateau persists
+                                if(!postPlan.isComplete && (plateauCounts[canonicalKey] >= 2 || canonicalRepeatCounts[canonicalKey] >= 4)){
+                                    console.log('🗺️🔁 Escalating planner BFS (depth<=7 composite)');
+                                    const plannerDeep = plannerSearchCompletion(workingState, { maxDepth:7, composite:true });
+                                    if(plannerDeep.success && plannerDeep.algorithm){
+                                        console.log(`🗺️ Deep planner completion: ${plannerDeep.algorithm}`);
+                                        const pMoves2 = parseMoveNotation3x3(plannerDeep.algorithm);
+                                        applyMoveSequence3x3(workingState, pMoves2);
+                                        totalMoves += pMoves2.length;
+                                        appliedAlgorithms.push({ case: 'planner', name: 'Planner Deep Completion', algorithm: plannerDeep.algorithm, moves: pMoves2.length, classification: 'finisher' });
+                                        const postPlan2 = analyzeOLLState(workingState);
+                                        recordOLLMetric({ attempt: attempts, caseId: 'planner', caseName: 'Planner Deep Completion', classification: 'finisher', algorithm: plannerDeep.algorithm, rotationApplied:0, prePattern: postPlan.pattern, postPattern: postPlan2.pattern, improved: (postPlan2.pattern.match(/1/g)||[]).length > (postPlan.pattern.match(/1/g)||[]).length, complete: postPlan2.isComplete });
+                                        if(postPlan2.isComplete){
+                                            runtimeFinishers[canonicalKey] = plannerDeep.algorithm; attempts++; break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if (postAnalysis.isComplete) {
             console.log(`✅ OLL solved after applying ${caseName}`);
             break; // Exit immediately when OLL is complete
@@ -1994,6 +2651,35 @@ export function solveOLL(cubeState) {
         }
     }
     
+    // Auto-demotion & persistence step (metrics-driven, in-function) before returning
+    try {
+        const classMap = global.__OLL_ALG_CLASSIFICATION;
+        if(!finalAnalysis.isComplete){
+            const finisherAttempts = {};
+            for(const a of appliedAlgorithms){
+                if(a.classification === 'finisher') finisherAttempts[a.case] = (finisherAttempts[a.case]||0)+1;
+            }
+            for(const caseId of Object.keys(finisherAttempts)){
+                const rec = classMap[caseId];
+                if(!rec) continue;
+                if(rec.classification === 'finisher' && finisherAttempts[caseId] >= 2){
+                    const producedCompletion = appliedAlgorithms.some(a=>a.case===caseId && a.classification==='finisher' && finalAnalysis.isComplete);
+                    if(!producedCompletion){
+                        rec.classification = 'setup';
+                        rec.autoDemoted = true;
+                        rec.autoDemoteReason = 'No completion after multi finisher attempts in failed session';
+                        console.log(`🔻 Auto-demoted OLL case ${caseId} (end-of-run)`);
+                    }
+                }
+            }
+        }
+        try {
+            const outPath = resolve(process.cwd(), 'backend', 'data', 'oll-classification-dynamic.json');
+            writeFileSync(outPath, JSON.stringify(classMap, null, 2));
+        } catch(e) {}
+    } catch(e){ console.warn('Classification persistence step failed:', e.message); }
+    // Persist runtime finishers if updated
+    try { writeFileSync(RUNTIME_FINISHERS_PATH, JSON.stringify(runtimeFinishers, null, 2)); } catch(e){}
     return {
         success: success,
         totalMoves: totalMoves,
@@ -2088,7 +2774,13 @@ function makeF2LSignature(cubeState) {
 
 function verifyF2LIntegrity(beforeSig, cubeState) {
     const afterSig = makeF2LSignature(cubeState);
-    return { ok: beforeSig === afterSig, afterSig };
+    if(beforeSig === afterSig) return { ok:true, afterSig, diff:0 };
+    // diff = count of differing characters (simple Hamming distance)
+    let diff = 0;
+    const len = Math.min(beforeSig.length, afterSig.length);
+    for(let i=0;i<len;i++) if(beforeSig[i] !== afterSig[i]) diff++;
+    diff += Math.abs(beforeSig.length - afterSig.length);
+    return { ok:false, afterSig, diff };
 }
 // ========================= END INTEGRITY UTILITIES =========================
 
@@ -2691,13 +3383,12 @@ export function solvePLL(cubeState) {
         if (!matchedCase) {
             const fallbackAlgorithms = getPLLFallbackAlgorithms();
             let fallbackAlg = fallbackAlgorithms.find(alg => alg.pattern === analysis.pattern);
-            
-            // If no exact match, use DEFAULT algorithm for unknown patterns
+
+            // If no exact match, use DEFAULT algorithm (only early attempts to avoid loops)
             if (!fallbackAlg && attempts < 2) {
                 fallbackAlg = fallbackAlgorithms.find(alg => alg.pattern === "DEFAULT");
             }
-            
-            // Convert fallback to matchedCase format
+
             if (fallbackAlg) {
                 matchedCase = {
                     id: 'fallback',
@@ -2714,7 +3405,7 @@ export function solvePLL(cubeState) {
             console.log(`✅ Found PLL case: ${caseName} (ID: ${matchedCase.id})`);
             console.log(`🎯 Algorithm: ${algorithmToApply}`);
             console.log(`Using verified fallback algorithm for ${caseName}: ${algorithmToApply}`);
-            progressMade = true;
+            progressMade = true; // (kept for potential future heuristic adjustments)
         } else if (attempts < 2) {
             // Only try setup moves for first couple attempts
             console.warn('Unknown PLL pattern:', analysis.pattern);

@@ -1,0 +1,110 @@
+{
+  "17": {
+    "classification": "finisher",
+    "initialScore": 3,
+    "finalScore": 8
+  },
+  "18": {
+    "classification": "finisher",
+    "initialScore": 5,
+    "finalScore": 8
+  },
+  "19": {
+    "classification": "finisher",
+    "initialScore": 6,
+    "finalScore": 8
+  },
+  "20": {
+    "classification": "finisher",
+    "initialScore": 6,
+    "finalScore": 8
+  },
+  "21": {
+    "classification": "finisher",
+    "initialScore": 4,
+    "finalScore": 8
+  },
+  "26": {
+    "classification": "setup",
+    "initialScore": 6,
+    "finalScore": 8,
+    "autoDemoted": true,
+    "autoDemoteReason": "Batch metrics demotion (0% completion, low improvement)"
+  },
+  "27": {
+    "classification": "setup",
+    "initialScore": 5,
+    "finalScore": 8,
+    "autoDemoted": true,
+    "autoDemoteReason": "No completion after multi finisher attempts in failed session"
+  },
+  "52": {
+    "classification": "finisher",
+    "initialScore": 4,
+    "finalScore": 8
+  },
+  "201": {
+    "classification": "finisher",
+    "initialScore": 5,
+    "finalScore": 8
+  },
+  "202": {
+    "classification": "setup",
+    "initialScore": 5,
+    "finalScore": 8,
+    "autoDemoted": true,
+    "autoDemoteReason": "Batch metrics demotion (0% completion, low improvement)"
+  },
+  "203": {
+    "classification": "finisher",
+    "initialScore": 5,
+    "finalScore": 8
+  },
+  "204": {
+    "classification": "finisher",
+    "initialScore": 5,
+    "finalScore": 8
+  },
+  "205": {
+    "classification": "finisher",
+    "initialScore": 5,
+    "finalScore": 8
+  },
+  "206": {
+    "classification": "finisher",
+    "initialScore": 5,
+    "finalScore": 8
+  },
+  "8000": {
+    "classification": "finisher",
+    "initialScore": 4,
+    "finalScore": 8
+  },
+  "8002": {
+    "classification": "finisher",
+    "initialScore": 4,
+    "finalScore": 8
+  },
+  "8003": {
+    "classification": "finisher",
+    "initialScore": 2,
+    "finalScore": 8
+  },
+  "8004": {
+    "classification": "finisher",
+    "initialScore": 6,
+    "finalScore": 8
+  },
+  "8005": {
+    "classification": "finisher",
+    "initialScore": 3,
+    "finalScore": 8
+  },
+  "9001": {
+    "classification": "setup",
+    "initialScore": 4,
+    "finalScore": 8,
+    "autoDemoted": true,
+    "autoDemoteReason": "No completion after multi finisher attempts in failed session"
+  }
+}
