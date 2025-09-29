@@ -9,7 +9,9 @@ const scramble = "R U R' F D F' L U L'";
 console.log('Scramble:', scramble);
 
 try {
-  const scrambledCube = solver.applyMoveSequence3x3(solvedCube, scramble);
+  // Apply scramble to the cube (modifies in place)
+  solver.applyMoveSequence3x3(solvedCube, scramble);
+  const scrambledCube = solvedCube;
 
   // Analyze scrambled state
   console.log('\n📊 Scrambled cube cross analysis:');
