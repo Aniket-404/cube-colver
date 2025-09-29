@@ -67,9 +67,9 @@ const CANDIDATE_OLL_ALGORITHMS = [
     },
     {
         pattern: "11010100",
-        algorithm: "R' U' R U' R' U2 R",
+        algorithm: "L' U2 L U L' U L",
         name: "Anti-Sune (OLL 26)",
-        source: "Standard speedcubing algorithm"
+        source: "Standard speedcubing algorithm - fixed"
     },
     {
         pattern: "00111100",
@@ -78,27 +78,42 @@ const CANDIDATE_OLL_ALGORITHMS = [
         source: "Basic T-shape algorithm"
     },
     {
-        pattern: "01101110",
-        algorithm: "F U R U' R' F'",
-        name: "L-Shape OLL",
-        source: "Standard L-shape algorithm"
+        pattern: "01101110", 
+        algorithm: "r U R' U' r' F R F'",
+        name: "L-Shape OLL (OLL 17)",
+        source: "Standard L-shape algorithm - corrected"
     },
-    // Test some potentially problematic algorithms
     {
-        pattern: "10011001",
+        pattern: "10101010",
+        algorithm: "R U R' U R U' R' U R U2 R'",
+        name: "H-OLL (OLL 19)",
+        source: "Standard H-pattern algorithm"
+    },
+    {
+        pattern: "01010101",
+        algorithm: "R U2 R2 U' R2 U' R2 U2 R",
+        name: "Pi-OLL (OLL 18)",
+        source: "Standard Pi-pattern algorithm"
+    },
+    {
+        pattern: "01111110",
+        algorithm: "R U R' U R U' R' U R U2 R'",
+        name: "Cross OLL (OLL 20)",
+        source: "Standard cross-pattern algorithm"
+    },
+    {
+        pattern: "10011110",
+        algorithm: "R2 D R' U2 R D' R' U2 R'",
+        name: "Bowtie OLL (OLL 22)",
+        source: "Standard bowtie algorithm"
+    },
+    {
+        pattern: "11001001",
         algorithm: "F R U R' U' F'",
-        name: "Test Pattern 1",
-        source: "Validation test"
-    },
-    {
-        pattern: "01100110",
-        algorithm: "R U R' U R U2 R'",
-        name: "Test Pattern 2", 
-        source: "Validation test"
+        name: "I-Shape OLL (OLL 52)",
+        source: "Basic I-shape algorithm"
     }
-];
-
-/**
+];/**
  * Validate a single algorithm against its intended pattern
  * @param {Object} algorithm - Algorithm to test
  * @param {Object} testCase - Test case with setup moves
