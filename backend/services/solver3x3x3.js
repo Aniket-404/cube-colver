@@ -17,6 +17,11 @@ import {
     extractCornerPieces,
     extractCenterPieces
 } from '../utils/cubeStructures.js';
+import { recordUnknownOLL } from '../utils/ollUnknownLogger.js';
+import { createRequire } from 'module';
+import { readFileSync, existsSync } from 'fs';
+import { resolve } from 'path';
+const require = createRequire(import.meta.url);
 
 // ========================= MOVE NOTATION PARSER =========================
 
@@ -1629,8 +1634,51 @@ const OLL_CASES = [
         name: "Anti-Sune Variant",
         verified: true,
         testCaseProven: "Live pattern debugging - L' U2 L U L' U L generates 11111010"
-    }
+    },
+
+    // === PLACEHOLDER OBSERVED PATTERNS (disabled until verified) ===
+    { id: 901, pattern: "01110010", algorithm: "R U R' U R U2 R'", name: "Observed Unknown A", enabled: false, notes: "Needs proper alg" },
+    { id: 902, pattern: "11011000", algorithm: "F R U R' U' F'", name: "Observed Unknown B", enabled: false, notes: "Needs proper alg" },
+    { id: 903, pattern: "00011000", algorithm: "R U R' U R U2 R'", name: "Observed Unknown C", enabled: false, notes: "Needs proper alg" },
+    { id: 904, pattern: "11101011", algorithm: "F R U R' U' F'", name: "Observed Unknown D", enabled: false, notes: "Needs proper alg" }
 ];
+
+/**
+ * Programmatically register (enable) a new verified OLL case at runtime.
+ * Avoid duplicates by pattern; replaces placeholder if pattern matches disabled case.
+ */
+export function registerOLLCase({ id, pattern, algorithm, name, verified=true, notes='', testCaseProven='' }) {
+    // Check existing enabled case
+    const existing = OLL_CASES.find(c => c.pattern === pattern && c.enabled !== false);
+    if (existing) return existing;
+    // Replace placeholder if exists
+    const placeholderIndex = OLL_CASES.findIndex(c => c.pattern === pattern && c.enabled === false);
+    const entry = { id, pattern, algorithm, name, verified, testCaseProven: testCaseProven || 'Auto-derived', notes };
+    if (placeholderIndex >= 0) {
+        OLL_CASES[placeholderIndex] = entry;
+        return entry;
+    }
+    OLL_CASES.push(entry);
+    return entry;
+}
+
+// ==== AUTO-LOAD DERIVED OLL CASES (if provenance file exists) ====
+try {
+    const derivedPath = resolve(process.cwd(), 'backend', 'data', 'oll-derived.json');
+    if (existsSync(derivedPath)) {
+        const raw = JSON.parse(readFileSync(derivedPath, 'utf-8'));
+        if (raw && Array.isArray(raw.derived)) {
+            raw.derived.forEach(d => {
+                if (d && d.pattern && d.algorithm) {
+                    registerOLLCase({ id: d.id ?? 8000, pattern: d.pattern, algorithm: d.algorithm, name: d.name || `Auto-Derived ${d.pattern}`, verified: false, notes: d.source || 'derived-file' });
+                }
+            });
+            console.log(`[OLL] Loaded ${raw.derived.length} derived OLL case(s) from provenance file.`);
+        }
+    }
+} catch (e) {
+    console.warn('Failed loading derived OLL cases:', e.message);
+}
 
 /**
  * Extract OLL pattern from cube state (U face orientation analysis)
@@ -1684,6 +1732,7 @@ export function rotateOLLPattern(pattern) {
 export function matchOLLPattern(currentPattern) {
     // Try all 4 rotations for each OLL case
     for (const ollCase of OLL_CASES) {
+        if (ollCase.enabled === false) continue; // skip placeholders
         let testPattern = ollCase.pattern;
         
         for (let rotation = 0; rotation < 4; rotation++) {
@@ -1776,6 +1825,11 @@ export function solveOLL(cubeState) {
     
     let progressMade = false;
     let bestOrientationScore = 0;
+    let stagnationCounter = 0;
+    const stagnationLimit = 3;
+    const orientationHistory = [];
+    const snapshotState = cloneCubeState(workingState); // baseline snapshot
+    const f2lSignature = makeF2LSignature(workingState); // integrity baseline
     
     while (attempts < maxAttempts) {
         const analysis = analyzeOLLState(workingState);
@@ -1790,11 +1844,15 @@ export function solveOLL(cubeState) {
         if (currentOrientationScore > bestOrientationScore) {
             bestOrientationScore = currentOrientationScore;
             progressMade = true;
-        } else if (attempts > 3 && !progressMade) {
-            // If we haven't made progress in multiple attempts, stop to prevent loops
-            console.log('⚠️ No progress in OLL solving, stopping to prevent infinite loop');
-            break;
+            stagnationCounter = 0;
+        } else {
+            stagnationCounter++;
+            if (stagnationCounter >= stagnationLimit) {
+                console.log('⚠️ Stagnation detected in OLL solving, aborting to avoid destructive loops');
+                break;
+            }
         }
+        orientationHistory.push({ attempt: attempts, pattern: analysis.pattern, score: currentOrientationScore });
         
         // Get algorithm for current case - prioritize verified fallback algorithms
         let algorithmToApply = null;
@@ -1855,15 +1913,38 @@ export function solveOLL(cubeState) {
             algorithmToApply = setupAlg;
             caseName = `Setup Move ${attempts + 1}`;
             console.log(`Using setup move for unknown pattern: ${setupAlg}`);
+            // Log unknown pattern for later algorithm derivation
+            try {
+                recordUnknownOLL({
+                    pattern: analysis.pattern,
+                    cubeStateSerialized: JSON.stringify(workingState.faces),
+                    orientationScore: (analysis.pattern.match(/1/g) || []).length,
+                    attemptIndex: attempts
+                });
+            } catch (e) {}
         } else {
             // EMERGENCY BREAKTHROUGH - Try cube rotations + simple algorithms
-            console.log('⚠️ Emergency mode: Trying cube rotation breakthrough');
-            const emergencySequence = "y R U R' U R U2 R' y'"; // Rotate cube + Sune + rotate back
+            console.log('⚠️ Emergency mode: Using safe orientation algorithm pool');
+            const emergencyPool = [
+                "R U R' U R U2 R'", // Sune
+                "F R U R' U' F'",   // T-OLL
+                "r U R' U' r' F R F'" // L-shape
+            ];
+            const emergencySequence = emergencyPool[attempts % emergencyPool.length];
             algorithmToApply = emergencySequence;
-            caseName = "Emergency Rotation Solve";
+            caseName = "Emergency Orientation Attempt";
+            // Log persistent unknown / emergency scenario
+            try {
+                recordUnknownOLL({
+                    pattern: analysis.pattern,
+                    cubeStateSerialized: JSON.stringify(workingState.faces),
+                    orientationScore: (analysis.pattern.match(/1/g) || []).length,
+                    attemptIndex: attempts
+                });
+            } catch (e) {}
         }
         
-        // Apply the algorithm
+    // Apply the algorithm
         const parsedMoves = parseMoveNotation3x3(algorithmToApply);
         applyMoveSequence3x3(workingState, parsedMoves);
         
@@ -1877,6 +1958,20 @@ export function solveOLL(cubeState) {
         
         // Check immediately if OLL is now complete
         const postAnalysis = analyzeOLLState(workingState);
+        // Decide if we enforce integrity (only for unknown / fallback / emergency attempts)
+        const enforceIntegrity = (caseName.includes('Setup') || caseName.includes('Emergency') || caseName.includes('fallback') || caseName === 'Unknown OLL Case');
+        if (enforceIntegrity) {
+            const integrity = verifyF2LIntegrity(f2lSignature, workingState);
+            if (!integrity.ok) {
+                console.warn('🚨 F2L integrity violation detected after UNKNOWN pattern attempt – reverting this attempt');
+                // revert to snapshot (not aborting entire OLL; allow next attempt)
+                Object.keys(snapshotState.faces).forEach(face => {
+                    workingState.faces[face] = [...snapshotState.faces[face]];
+                });
+                attempts++; // count this attempt
+                continue; // try another approach
+            }
+        }
         console.log(`   Post-algorithm analysis: Pattern=${postAnalysis.pattern}, Complete=${postAnalysis.isComplete}`);
         if (postAnalysis.isComplete) {
             console.log(`✅ OLL solved after applying ${caseName}`);
@@ -1887,10 +1982,17 @@ export function solveOLL(cubeState) {
     }
     
     const finalAnalysis = analyzeOLLState(workingState);
-    
-    // Consider it successful if we applied algorithms and made progress
-    const madeProgress = appliedAlgorithms.length > 0;
-    const success = finalAnalysis.isComplete || (madeProgress && totalMoves > 0);
+    let success = finalAnalysis.isComplete; // strict
+    if (!success) {
+        const finalScore = (finalAnalysis.pattern.match(/1/g) || []).length;
+        if (finalScore < bestOrientationScore) {
+            // revert to snapshot if we regressed
+            console.log('↩️ Reverting cube state to pre-OLL snapshot due to regression');
+            Object.keys(snapshotState.faces).forEach(face => {
+                workingState.faces[face] = [...snapshotState.faces[face]];
+            });
+        }
+    }
     
     return {
         success: success,
@@ -1899,7 +2001,8 @@ export function solveOLL(cubeState) {
         attempts: attempts,
         finalState: workingState,
         isOLLComplete: finalAnalysis.isComplete,
-        finalPattern: finalAnalysis.pattern
+        finalPattern: finalAnalysis.pattern,
+        orientationHistory
     };
 }
 
@@ -1949,6 +2052,45 @@ export function isOLLComplete(cubeState) {
     const pattern = getOLLPattern(cubeState);
     return pattern === "11111111";
 }
+
+// ========================= F2L/OLL INTEGRITY UTILITIES =========================
+/**
+ * Create a compact signature representing the solved F2L structure so we can detect destructive OLL attempts.
+ * We include:
+ *  - Entire D face
+ *  - Middle layer edge side stickers (ring FR, RB, BL, LF)
+ *  - Side stickers of D-layer corners (DFR, DRB, DBL, DLF)
+ * This is lightweight and sufficient to detect unintended F2L mutation.
+ */
+function makeF2LSignature(cubeState) {
+    try {
+        const f = cubeState.faces;
+        let sig = f.D.join('');
+        const middlePairs = [
+            f.F[5], f.R[3], // FR
+            f.R[5], f.B[3], // RB
+            f.B[5], f.L[3], // BL
+            f.L[5], f.F[3]  // LF
+        ];
+        sig += middlePairs.join('');
+        const dCorners = [
+            f.F[8], f.R[6], // DFR
+            f.R[8], f.B[6], // DRB
+            f.B[8], f.L[6], // DBL
+            f.L[8], f.F[6]  // DLF
+        ];
+        sig += dCorners.join('');
+        return sig;
+    } catch (e) {
+        return 'ERR';
+    }
+}
+
+function verifyF2LIntegrity(beforeSig, cubeState) {
+    const afterSig = makeF2LSignature(cubeState);
+    return { ok: beforeSig === afterSig, afterSig };
+}
+// ========================= END INTEGRITY UTILITIES =========================
 
 /**
  * Get comprehensive OLL algorithms reference
